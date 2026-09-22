@@ -356,10 +356,6 @@ with tab_ranking:
             st.plotly_chart(style_fig(fig, 300), use_container_width=True)
             st.dataframe(styled_table(summary, currency_cols=["total_omzet"], number_cols=["jumlah_sku"]),
                          use_container_width=True, hide_index=True)
-        with st.expander("Lihat detail per barang"):
-            st.dataframe(styled_table(abc, currency_cols=["omzet"], number_cols=["rank_omzet", "total_sku"],
-                                       pct_cols=["persen_kumulatif", "persen_sku_kumulatif"]),
-                         use_container_width=True, hide_index=True)
 
     with col_b:
         head("Efisiensi kategori", "Omzet per SKU — kategori 'gemuk' vs efisien", RUST)
@@ -374,6 +370,12 @@ with tab_ranking:
             fig.update_layout(showlegend=False, yaxis_title=None, xaxis_title="Omzet per SKU (Rp)")
             fig.update_xaxes(tickformat=",.0f")
             st.plotly_chart(style_fig(fig, 380), use_container_width=True)
+
+    with st.expander("📋 Lihat detail ABC per barang (semua SKU)"):
+        if not abc.empty:
+            st.dataframe(styled_table(abc, currency_cols=["omzet"], number_cols=["rank_omzet", "total_sku"],
+                                       pct_cols=["persen_kumulatif", "persen_sku_kumulatif"]),
+                         use_container_width=True, hide_index=True)
 
     head("Ranking lengkap kategori", "", GREY)
     if not cat.empty:
