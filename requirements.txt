@@ -2,5 +2,3 @@ streamlit
 plotly
 pandas
 requests
-extra-streamlit-components
- 
