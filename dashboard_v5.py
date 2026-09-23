@@ -20,6 +20,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from datetime import datetime, date
 
 st.set_page_config(page_title="Toko Pertiwi — Sales & Promosi", layout="wide", page_icon="🧱")
 
@@ -264,6 +265,26 @@ if not daily.empty:
         <div><div class="tp-hero-sub" style="font-size:1.1rem;color:{TEXT_MUTED}">{rentang}</div><div class="tp-hero-lbl">Rentang data</div></div>
     </div>
     """, unsafe_allow_html=True)
+
+    # ---- Badge kesehatan sinkronisasi data ----
+    try:
+        last_date = datetime.strptime(daily["tanggal"].max(), "%Y-%m-%d").date()
+        days_stale = (date.today() - last_date).days
+    except (TypeError, ValueError):
+        days_stale = None
+
+    if days_stale is not None:
+        if days_stale <= 1:
+            b_color, b_bg, b_text = TEAL, "#EAF6F1", f"✅ Data up to date — transaksi terakhir {last_date}"
+        elif days_stale <= 3:
+            b_color, b_bg, b_text = AMBER, "#FFF8EC", f"⚠️ Data telat {days_stale} hari — transaksi terakhir {last_date}, cek sinkronisasi"
+        else:
+            b_color, b_bg, b_text = RUST, "#FCEDEA", f"🔴 Sinkronisasi kemungkinan macet — data terakhir {days_stale} hari lalu ({last_date})"
+        st.markdown(
+            f'<div style="display:inline-block; background:{b_bg}; border:1px solid {b_color}; color:{b_color}; '
+            f'padding:5px 14px; border-radius:20px; font-size:0.82rem; font-weight:600; margin-bottom:10px;">{b_text}</div>',
+            unsafe_allow_html=True,
+        )
 
 st.markdown(f'<hr style="border-color:{BORDER}; margin:0 0 18px 0;">', unsafe_allow_html=True)
 
