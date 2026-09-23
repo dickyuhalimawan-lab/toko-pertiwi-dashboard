@@ -21,6 +21,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from datetime import datetime, date
+from urllib.parse import quote
 
 st.set_page_config(page_title="Toko Pertiwi — Sales & Promosi", layout="wide", page_icon="🧱")
 
@@ -532,11 +533,31 @@ with tab_kualitas:
     head("Variasi harga jual (SKU + satuan yang sama)", "", GREY)
     explain("Barang dengan rentang harga sangat lebar (>90%) di satuan yang SAMA biasanya bukan diskon nyata — "
             "sering kali kasir salah pilih satuan (misal pilih 'per KG' padahal maksudnya 'per SAK'). "
-            "Cek beberapa transaksi manual dulu di Accurate sebelum menyimpulkan ini pola diskon yang disengaja.")
+            "Tapi hati-hati: kalau harga yang sama dipakai KONSISTEN oleh banyak kasir di banyak tanggal, itu justru "
+            "kebijakan harga yang disengaja (mis. jual eceran per-KG memang lebih mahal per-satuan berat dibanding beli per-SAK utuh) — "
+            "bukan kesalahan. Yang perlu dicek adalah baris yang MENYIMPANG dari pola mayoritasnya.")
     if not price_var.empty:
         st.dataframe(styled_table(price_var, currency_cols=["harga_terendah", "harga_tertinggi", "harga_rata2"],
                                    number_cols=["jumlah_baris_transaksi", "jumlah_harga_berbeda"], pct_cols=["rentang_persen"]),
                      use_container_width=True, hide_index=True)
+
+        st.markdown("**🔍 Telusuri per barang — lihat faktur, tanggal, dan penginputnya**")
+        price_var_disp = price_var.copy()
+        price_var_disp["_label"] = price_var_disp["kode_barang"] + " — " + price_var_disp["nama_barang"].fillna("") + " (" + price_var_disp["unit"] + ")"
+        label_to_pair = dict(zip(price_var_disp["_label"], zip(price_var_disp["kode_barang"], price_var_disp["unit"])))
+        pilihan = st.selectbox("Pilih barang untuk ditelusuri:", price_var_disp["_label"].tolist(), key="pilih_price_var")
+        if pilihan:
+            kode_pilih, unit_pilih = label_to_pair[pilihan]
+            detail = sb("v_tp_item_price_variance_detail",
+                        f"kode_barang=eq.{quote(str(kode_pilih))}&unit=eq.{quote(str(unit_pilih))}&order=unit_price.asc")
+            if not detail.empty:
+                st.dataframe(
+                    styled_table(detail[["no_faktur", "tanggal", "penginput", "qty", "unit_price", "total_price"]],
+                                 currency_cols=["unit_price", "total_price"], number_cols=["qty"]),
+                    use_container_width=True, hide_index=True,
+                )
+                explain("Baris paling atas/bawah (harga paling beda dari mayoritas) adalah kandidat pertama untuk dicek ke penginputnya — "
+                        "tanyakan apakah waktu itu memang bermaksud jual di satuan tersebut atau salah pilih di kasir.")
 
     head("Barang paling lama tidak terjual", "", GREY)
     explain("PERINGATAN: data baru mencakup periode pendek (mulai 31 Agustus 2026). 'Lama tidak terjual' di sini "
