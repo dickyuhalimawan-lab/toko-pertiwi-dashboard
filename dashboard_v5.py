@@ -20,7 +20,9 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from datetime import datetime, date
+import extra_streamlit_components as stx
+import hashlib
+from datetime import datetime, date, timedelta
 from urllib.parse import quote
 
 st.set_page_config(page_title="Toko Pertiwi — Sales & Promosi", layout="wide", page_icon="🧱")
@@ -103,8 +105,22 @@ h1, h2, h3 {{ font-family: 'Space Grotesk', sans-serif; }}
 
 
 # ======================================================================
-# LOGIN GATE — halaman ini yang muncul PERTAMA sebelum dashboard
+# LOGIN GATE — dengan cookie supaya bertahan walau hard-refresh
 # ======================================================================
+def make_auth_token():
+    raw = f"{LOGIN_EMAIL.strip().lower()}:{LOGIN_PASSWORD}:toko-pertiwi-salt-v1"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+cookie_manager = stx.CookieManager(key="tp_cookie_manager")
+
+# Cek cookie SEBELUM menampilkan form login — kalau cocok, langsung anggap sudah login.
+if not st.session_state.get("tp_logged_in"):
+    _all_cookies = cookie_manager.get_all()
+    if _all_cookies.get("tp_auth") == make_auth_token():
+        st.session_state["tp_logged_in"] = True
+
+
 def login_screen():
     st.markdown(f"""
     <div style="max-width:380px; margin: 60px auto 0 auto; text-align:center;">
@@ -118,10 +134,17 @@ def login_screen():
         with st.form("login_form"):
             email = st.text_input("Email")
             password = st.text_input("Password", type="password")
+            ingat = st.checkbox("Ingat saya di perangkat ini (30 hari)", value=True)
             submitted = st.form_submit_button("Masuk", use_container_width=True)
         if submitted:
             if email.strip().lower() == LOGIN_EMAIL.strip().lower() and password == LOGIN_PASSWORD:
                 st.session_state["tp_logged_in"] = True
+                if ingat:
+                    cookie_manager.set(
+                        "tp_auth", make_auth_token(),
+                        expires_at=datetime.now() + timedelta(days=30),
+                        key="set_auth_cookie",
+                    )
                 st.rerun()
             else:
                 st.error("Email atau password salah.")
@@ -253,6 +276,7 @@ with col_refresh:
 with col_logout:
     if st.button("🚪 Keluar"):
         st.session_state["tp_logged_in"] = False
+        cookie_manager.delete("tp_auth", key="delete_auth_cookie")
         st.rerun()
 
 if not daily.empty:
