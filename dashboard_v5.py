@@ -193,7 +193,7 @@ def style_fig(fig, height=380):
     return fig
 
 
-def styled_table(df, currency_cols=None, number_cols=None, pct_cols=None, color_col=None):
+def styled_table(df, currency_cols=None, number_cols=None, pct_cols=None, color_col=None, invert_color=False):
     if df.empty:
         return df
     fmt = {}
@@ -213,10 +213,12 @@ def styled_table(df, currency_cols=None, number_cols=None, pct_cols=None, color_
                 v = float(v)
             except (TypeError, ValueError):
                 return ""
+            positif_warna = RUST if invert_color else TEAL
+            negatif_warna = TEAL if invert_color else RUST
             if v > 0:
-                return f"color: {TEAL}; font-weight: 600;"
+                return f"color: {positif_warna}; font-weight: 600;"
             if v < 0:
-                return f"color: {RUST}; font-weight: 600;"
+                return f"color: {negatif_warna}; font-weight: 600;"
             return ""
         styler = styler.map(_c, subset=[color_col])
     return styler
@@ -529,6 +531,39 @@ with tab_kualitas:
 
     price_var = sb("v_tp_item_price_variance", "order=rentang_persen.desc&limit=25")
     recency = sb("v_tp_item_recency", "order=hari_sejak_terakhir_terjual.desc&limit=20")
+    unit_errors = sb("v_tp_potential_unit_errors", "order=potensi_selisih_rp.desc&limit=100")
+
+    head("⚠️ Potensi salah satuan yang berdampak ke uang", "Transaksi yang harganya menyimpang jauh dari pola biasa", RUST)
+    explain(
+        "Tiap transaksi dibandingkan dengan harga yang <b>paling sering dipakai</b> untuk kombinasi barang+satuan yang sama. "
+        "Kalau menyimpang jauh, ditampilkan di sini beserta perkiraan selisih uangnya. "
+        "<b>PENTING — ini bisa berarti dua hal berbeda, harus dicek manual ke penginputnya:</b><br>"
+        "① <b>Uang benar-benar kurang/lebih diterima</b> — kasir memang mengenakan harga yang salah ke pembeli.<br>"
+        "② <b>Uang sudah benar, cuma label satuan yang salah dipilih di sistem</b> — misalnya bermaksud jual 15 SAK dengan harga SAK yang benar, "
+        "tapi di sistem ke-pilih satuan 'KG'. Uang yang diterima kemungkinan tetap benar, tapi <b>stok jadi salah tercatat</b> "
+        "(sistem mengurangi 15 KG dari stok, padahal fisik yang keluar 15 SAK = 750 KG) — ini tetap perlu dibenahi meski bukan soal uang."
+    )
+    if not unit_errors.empty:
+        st.dataframe(
+            styled_table(
+                unit_errors[["no_faktur", "tanggal", "penginput", "kode_barang", "nama_barang", "unit",
+                             "harga_modus", "harga_transaksi_ini", "qty", "uang_tercatat",
+                             "uang_seharusnya_jika_ikut_modus", "potensi_selisih_rp"]],
+                currency_cols=["harga_modus", "harga_transaksi_ini", "uang_tercatat",
+                               "uang_seharusnya_jika_ikut_modus", "potensi_selisih_rp"],
+                number_cols=["qty"], color_col="potensi_selisih_rp", invert_color=True,
+            ),
+            use_container_width=True, hide_index=True,
+        )
+        total_selisih = unit_errors["potensi_selisih_rp"].astype(float).sum()
+        n_kurang = (unit_errors["potensi_selisih_rp"].astype(float) > 0).sum()
+        n_lebih = (unit_errors["potensi_selisih_rp"].astype(float) < 0).sum()
+        insight(f"Dari {len(unit_errors)} transaksi mencurigakan: <b>{n_kurang} berpotensi uang kurang tercatat</b>, "
+                f"<b>{n_lebih} berpotensi lebih</b> (bersih {id_rp(total_selisih)}). "
+                "Cek dulu langsung ke faktur aslinya di Accurate dan tanya penginputnya sebelum menyimpulkan ini kerugian nyata — "
+                "kemungkinan besar sebagian besar cuma salah label satuan, bukan salah kasih harga ke pembeli.")
+    else:
+        st.caption("Belum ada transaksi yang menyimpang cukup jauh untuk ditandai.")
 
     head("Variasi harga jual (SKU + satuan yang sama)", "", GREY)
     explain("Barang dengan rentang harga sangat lebar (>90%) di satuan yang SAMA biasanya bukan diskon nyata — "
