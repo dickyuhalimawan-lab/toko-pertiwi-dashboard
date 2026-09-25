@@ -1,7 +1,17 @@
 """
 =======================================================================
-DASHBOARD TOKO PERTIWI v5 — dengan LOGIN, siap di-deploy ke web
+DASHBOARD TOKO PERTIWI — nama file tetap dashboard_v5.py (logika v13)
 =======================================================================
+Perubahan v13 (25 Sep 2026):
+- 5 tab analisa baru: Pembeli Besar, Diskon & Harga, Brand, Stok & Katalog,
+  Staf & Hari (sumber: view v_tp_* baru di Supabase)
+- Deteksi hari "parsial" (data hari terakhir belum lengkap) di hero & grafik
+- Badge kesegaran data pakai jam WIB (bukan jam server UTC)
+- Catatan umur data ("data baru X hari") di hero
+- Password TIDAK lagi ditulis di kode (repo publik) — lokal dibaca dari
+  config_supabase.py (LOGIN_EMAIL, LOGIN_PASSWORD)
+- Satu view gagal dimuat tidak lagi membuat seluruh dashboard error
+
 Perubahan dari v4:
 - Ada halaman login (email + password) sebelum dashboard bisa dilihat
 - Kredensial Supabase & login dibaca dari st.secrets (kalau di-deploy ke
@@ -21,7 +31,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 import hashlib
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 from urllib.parse import quote
 
 st.set_page_config(page_title="Toko Pertiwi — Sales & Promosi", layout="wide", page_icon="🧱")
@@ -36,9 +47,14 @@ try:
     LOGIN_EMAIL = st.secrets["LOGIN_EMAIL"]
     LOGIN_PASSWORD = st.secrets["LOGIN_PASSWORD"]
 except Exception:
-    from config_supabase import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
-    LOGIN_EMAIL = "dickyuhalimawan@gmail.com"
-    LOGIN_PASSWORD = "11111111"  # GANTI INI kalau sudah siap dipakai serius
+    import config_supabase as _cfg
+    SUPABASE_URL = _cfg.SUPABASE_URL
+    SUPABASE_SERVICE_ROLE_KEY = _cfg.SUPABASE_SERVICE_ROLE_KEY
+    LOGIN_EMAIL = getattr(_cfg, "LOGIN_EMAIL", "")
+    LOGIN_PASSWORD = getattr(_cfg, "LOGIN_PASSWORD", "")
+    if not LOGIN_EMAIL or not LOGIN_PASSWORD:
+        st.error("LOGIN_EMAIL / LOGIN_PASSWORD belum diisi di config_supabase.py (untuk jalan lokal).")
+        st.stop()
 
 # ======================================================================
 # TEMA — palet terang, aksen "blueprint & safety tape"
@@ -249,10 +265,58 @@ def sb(view: str, query: str = "") -> pd.DataFrame:
     return pd.DataFrame(resp.json())
 
 
+def sbs(view: str, query: str = "") -> pd.DataFrame:
+    """Versi aman dari sb(): kalau satu view gagal, tampilkan pesan kecil, dashboard tetap jalan."""
+    try:
+        return sb(view, query)
+    except Exception as e:  # noqa: BLE001
+        st.caption(f"⚠️ Data `{view}` belum bisa dimuat ({type(e).__name__}). Coba tombol Refresh; kalau tetap, cek view di Supabase.")
+        return pd.DataFrame()
+
+
+def sb_all(view: str, query: str = "", page: int = 1000, max_pages: int = 20) -> pd.DataFrame:
+    """Ambil semua baris walau > 1000 (batas default Supabase per request)."""
+    parts = []
+    for i in range(max_pages):
+        q = f"{query}&limit={page}&offset={i * page}" if query else f"limit={page}&offset={i * page}"
+        part = sbs(view, q)
+        if part.empty:
+            break
+        parts.append(part)
+        if len(part) < page:
+            break
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+
+def num(df: pd.DataFrame, cols) -> pd.DataFrame:
+    """Ubah kolom angka dari API (kadang string) jadi float."""
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+
+def today_wib() -> date:
+    try:
+        return datetime.now(ZoneInfo("Asia/Jakarta")).date()
+    except Exception:  # server tanpa data zona waktu -> pakai UTC+7 manual
+        return (datetime.utcnow() + timedelta(hours=7)).date()
+
+
 # ======================================================================
 # HERO
 # ======================================================================
 daily = sb("v_tp_sales_daily", "order=tanggal.asc")
+data_window = sbs("v_tp_data_window")
+
+# ---- Deteksi hari terakhir "parsial" (faktur < 50% median 7 hari sebelumnya) ----
+partial_day = None
+if len(daily) >= 4:
+    _d = num(daily.copy(), ["jumlah_faktur"])
+    _last = _d.iloc[-1]
+    _ref = _d.iloc[-8:-1]["jumlah_faktur"].median()
+    if _ref and _last["jumlah_faktur"] < 0.5 * _ref:
+        partial_day = {"tanggal": _last["tanggal"], "faktur": int(_last["jumlah_faktur"]), "ref": _ref}
 weekly = sb("v_tp_sales_weekly", "order=minggu_mulai.asc")
 dow = sb("v_tp_sales_by_dow", "order=urutan_hari.asc")
 
@@ -288,7 +352,7 @@ if not daily.empty:
     # ---- Badge kesehatan sinkronisasi data ----
     try:
         last_date = datetime.strptime(daily["tanggal"].max(), "%Y-%m-%d").date()
-        days_stale = (date.today() - last_date).days
+        days_stale = (today_wib() - last_date).days
     except (TypeError, ValueError):
         days_stale = None
 
@@ -305,11 +369,29 @@ if not daily.empty:
             unsafe_allow_html=True,
         )
 
+    if partial_day:
+        st.markdown(
+            f'<div style="display:inline-block; background:#FFF8EC; border:1px solid {AMBER}; color:{AMBER}; '
+            f'padding:5px 14px; border-radius:20px; font-size:0.82rem; font-weight:600; margin:0 0 10px 8px;">'
+            f'⏳ {partial_day["tanggal"]} kemungkinan belum lengkap — baru {partial_day["faktur"]} faktur '
+            f'(biasanya ±{id_num(partial_day["ref"])}). Jangan dibaca sebagai penurunan.</div>',
+            unsafe_allow_html=True,
+        )
+
+    if not data_window.empty:
+        _hari = pd.to_numeric(data_window.iloc[0].get("hari_transaksi"), errors="coerce")
+        if pd.notna(_hari) and _hari < 60:
+            _hari = int(_hari)
+            st.caption(f"📏 Data baru mencakup {_hari} hari transaksi. Pola harian/mingguan & kesimpulan 'barang tidak laku' "
+                       "masih indikatif — makin bisa dipercaya setelah ±8–12 minggu data.")
+
 st.markdown(f'<hr style="border-color:{BORDER}; margin:0 0 18px 0;">', unsafe_allow_html=True)
 
-tab_ringkasan, tab_ranking, tab_promosi, tab_segmen, tab_kualitas = st.tabs([
+(tab_ringkasan, tab_ranking, tab_promosi, tab_segmen, tab_besar, tab_diskon,
+ tab_brand, tab_stok, tab_staf, tab_kualitas) = st.tabs([
     "Ringkasan & Tren", "Ranking Barang/Kategori", "Promosi & Bundling",
-    "Segmentasi Transaksi", "Kualitas Data",
+    "Segmentasi Transaksi", "Pembeli Besar", "Diskon & Harga", "Brand",
+    "Stok & Katalog", "Staf & Hari", "Kualitas Data",
 ])
 
 # ==================================================================
@@ -324,6 +406,9 @@ with tab_ringkasan:
         fig = px.area(daily, x="tanggal", y="omzet")
         fig.update_traces(line_color=BLUE, fillcolor="rgba(29,127,168,0.12)")
         fig.update_yaxes(tickformat=",.0f")
+        if partial_day:
+            fig.add_annotation(x=partial_day["tanggal"], y=float(daily.iloc[-1]["omzet"]), text="belum lengkap",
+                               showarrow=True, arrowhead=2, arrowcolor=AMBER, font=dict(color=AMBER, size=11), ay=-40)
         st.plotly_chart(style_fig(fig, 320), use_container_width=True)
 
     col_a, col_b = st.columns(2)
@@ -536,6 +621,308 @@ with tab_segmen:
         st.caption("Belum ada pelanggan bernama di data saat ini.")
 
 # ==================================================================
+# TAB: PEMBELI BESAR (Pareto faktur)
+# ==================================================================
+with tab_besar:
+    bands = num(sbs("v_tp_invoice_size_bands", "order=band.asc"),
+                ["faktur", "pct_faktur", "omzet", "pct_omzet", "rata2_faktur", "rata2_baris", "rata2_segmen"])
+    curve = num(sb_all("v_tp_invoice_pareto", "select=persentil_faktur,kumulatif_omzet_pct&order=peringkat.asc,no_faktur.asc"),
+                ["persentil_faktur", "kumulatif_omzet_pct"])
+    top_inv = num(sbs("v_tp_invoice_pareto",
+                      "select=no_faktur,tanggal,penginput,baris,segmen_dibeli,omzet,diskon_rp&order=peringkat.asc&limit=25"),
+                  ["baris", "segmen_dibeli", "omzet", "diskon_rp"])
+
+    head("Omzet ditopang siapa?", "Porsi jumlah faktur vs porsi omzet, per besar nilai faktur", AMBER)
+    explain("Bandingkan dua batang di tiap kelompok. Kalau batang <b>omzet</b> jauh lebih tinggi dari batang "
+            "<b>jumlah faktur</b>, berarti kelompok itu sedikit orangnya tapi besar pengaruhnya ke uang toko.")
+    if not bands.empty:
+        long = bands.melt(id_vars="band", value_vars=["pct_faktur", "pct_omzet"], var_name="ukuran", value_name="persen")
+        long["ukuran"] = long["ukuran"].map({"pct_faktur": "% jumlah faktur", "pct_omzet": "% omzet"})
+        fig = px.bar(long, x="band", y="persen", color="ukuran", barmode="group", text="persen",
+                     color_discrete_map={"% jumlah faktur": GREY, "% omzet": AMBER})
+        fig.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+        fig.update_layout(xaxis_title="Nilai faktur", yaxis_title="%", legend_title=None)
+        st.plotly_chart(style_fig(fig, 340), use_container_width=True)
+
+        besar = bands[bands["band"].str.startswith(("4.", "5."))]
+        kecil = bands[bands["band"].str.startswith("1.")]
+        if not besar.empty and not kecil.empty:
+            insight(f"Faktur ≥ Rp1 juta cuma <b>{id_num(besar['faktur'].sum())} faktur ({id_pct(besar['pct_faktur'].sum())})</b>, "
+                    f"tapi menyumbang <b>{id_pct(besar['pct_omzet'].sum())} omzet</b>. Sebaliknya "
+                    f"{id_pct(kecil['pct_faktur'].sum())} faktur di bawah Rp100rb hanya {id_pct(kecil['pct_omzet'].sum())} omzet. "
+                    "Nama pelanggan di faktur hampir selalu kosong — jadi toko <b>belum tahu siapa pembeli besar ini</b> "
+                    "dan apakah mereka kembali. Usulan: wajibkan kasir mencatat nama + no. HP untuk setiap faktur ≥ Rp1 juta.")
+        st.dataframe(styled_table(bands, currency_cols=["omzet", "rata2_faktur"], number_cols=["faktur"],
+                                  pct_cols=["pct_faktur", "pct_omzet"]), use_container_width=True, hide_index=True)
+
+    col_a, col_b = st.columns([1.1, 1])
+    with col_a:
+        head("Kurva Pareto faktur", "Faktur diurutkan dari terbesar", BLUE)
+        explain("Sumbu bawah = persen faktur (terbesar dulu), sumbu kiri = persen omzet yang sudah terkumpul. "
+                "Makin cepat kurva naik ke atas, makin omzet bergantung pada segelintir transaksi.")
+        if not curve.empty:
+            fig = px.line(curve, x="persentil_faktur", y="kumulatif_omzet_pct")
+            fig.update_traces(line_color=BLUE, line_width=3)
+            fig.update_layout(xaxis_title="% faktur (terbesar dulu)", yaxis_title="% omzet kumulatif")
+            st.plotly_chart(style_fig(fig, 320), use_container_width=True)
+            p10 = curve[curve["persentil_faktur"] <= 10]["kumulatif_omzet_pct"].max()
+            if pd.notna(p10):
+                insight(f"<b>10% faktur terbesar = {id_pct(p10)} omzet.</b>")
+    with col_b:
+        head("25 faktur terbesar", "Kandidat pembeli proyek untuk ditelusuri namanya", TEAL)
+        if not top_inv.empty:
+            st.dataframe(styled_table(top_inv, currency_cols=["omzet", "diskon_rp"], number_cols=["baris", "segmen_dibeli"]),
+                         use_container_width=True, hide_index=True, height=360)
+
+# ==================================================================
+# TAB: DISKON & HARGA
+# ==================================================================
+with tab_diskon:
+    d_cat = num(sbs("v_tp_discount_by_category", "order=diskon_rp.desc"),
+                ["baris_total", "baris_diskon", "pct_baris_diskon", "faktur_diskon", "gross", "diskon_rp",
+                 "diskon_efektif_pct_rata2", "jumlah_variasi_pct"])
+    d_week = num(sbs("v_tp_discount_weekly", "order=minggu.asc"),
+                 ["baris", "baris_diskon", "pct_baris_diskon", "diskon_rp", "diskon_per_omzet_pct"])
+    d_lines = num(sbs("v_tp_discount_lines", "order=diskon_rp.desc&limit=300"),
+                  ["qty", "unit_price", "gross", "diskon_rp", "diskon_efektif_pct", "netto"])
+    leak_sum = num(sbs("v_tp_price_leakage_summary", "order=minggu.asc"),
+                   ["baris", "sku", "selisih_rp", "selisih_rp_qty_normal"])
+    leak = num(sbs("v_tp_price_leakage", "konteks_volume=like.Qty*&band=not.like.4*&order=selisih_rp.desc&limit=100"),
+               ["qty", "harga_modus", "harga_transaksi", "dibawah_modus_pct", "selisih_rp", "median_qty_grup"])
+
+    head("Diskon yang diberikan kasir", "Diskon per baris barang yang tercatat di Accurate", RUST)
+    explain("Yang dihitung di sini adalah diskon yang <b>diketik di faktur</b> (persen atau rupiah). Tawar-menawar yang "
+            "langsung mengubah harga satuan tanpa kolom diskon TIDAK masuk sini — itu ada di bagian 'harga di bawah kebiasaan' di bawah.")
+    if not d_cat.empty:
+        total_d = d_cat["diskon_rp"].sum()
+        omzet_total = float(daily["omzet"].astype(float).sum()) if not daily.empty else 0
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total diskon tercatat", id_rp_short(total_d))
+        m2.metric("Porsi dari omzet", id_pct(100 * total_d / omzet_total if omzet_total else 0, 2))
+        m3.metric("Baris berdiskon", id_num(d_cat["baris_diskon"].sum()))
+
+        tidak_konsisten = d_cat[d_cat["jumlah_variasi_pct"] > 1]
+        top = d_cat.iloc[0]
+        teks = (f"Diskon terbesar ada di <b>{top['kategori']}</b> ({id_rp_short(top['diskon_rp'])}, "
+                f"{id_pct(100 * top['diskon_rp'] / total_d if total_d else 0)} dari semua diskon). ")
+        if not tidak_konsisten.empty:
+            contoh = tidak_konsisten.iloc[0]
+            teks += (f"Ada <b>{len(tidak_konsisten)} kategori dengan persen diskon berbeda-beda</b> — misalnya "
+                     f"{contoh['kategori']}: {contoh['variasi_pct']}% oleh {contoh['pemberi_diskon']}. "
+                     "Besarnya kecil, masalahnya konsistensi: tanpa aturan tertulis, harga bergantung pada siapa yang melayani.")
+        insight(teks)
+
+        col_a, col_b = st.columns([1.2, 1])
+        with col_a:
+            st.dataframe(styled_table(d_cat[["kategori", "brand", "baris_diskon", "pct_baris_diskon", "diskon_rp",
+                                             "diskon_efektif_pct_rata2", "variasi_pct", "pemberi_diskon"]],
+                                      currency_cols=["diskon_rp"], number_cols=["baris_diskon"],
+                                      pct_cols=["pct_baris_diskon", "diskon_efektif_pct_rata2"]),
+                         use_container_width=True, hide_index=True, height=320)
+        with col_b:
+            if not d_week.empty:
+                fig = px.bar(d_week, x="minggu", y="diskon_rp", text="pct_baris_diskon")
+                fig.update_traces(marker_color=RUST, texttemplate="%{text:.1f}% baris", textposition="outside")
+                fig.update_layout(xaxis_title="Minggu mulai", yaxis_title="Diskon (Rp)")
+                fig.update_yaxes(tickformat=",.0f")
+                st.plotly_chart(style_fig(fig, 320), use_container_width=True)
+        with st.expander("📋 Semua baris berdiskon (untuk dicek ke kasir)"):
+            if not d_lines.empty:
+                st.dataframe(styled_table(d_lines, currency_cols=["unit_price", "gross", "diskon_rp", "netto"],
+                                          number_cols=["qty"], pct_cols=["diskon_efektif_pct"]),
+                             use_container_width=True, hide_index=True)
+    else:
+        st.caption("Belum ada diskon tercatat.")
+
+    head("Harga di bawah kebiasaan", "Harga satuan lebih rendah dari harga yang paling sering dipakai (barang + satuan sama)", AMBER)
+    explain("Tiap transaksi dibandingkan dengan harga yang paling sering dipakai untuk barang+satuan yang sama (minimal 5 transaksi). "
+            "<b>Tidak semua ini kebocoran.</b> Pembelian jumlah besar (≥3× jumlah biasa) kemungkinan sengaja diberi harga grosir, "
+            "jadi dipisahkan. Yang perlu dicek adalah yang <b>jumlahnya normal tapi harganya turun</b>. "
+            "Selisih >50% tidak dihitung di sini karena lebih mungkin salah pilih satuan (lihat tab Kualitas Data).")
+    if not leak_sum.empty:
+        ls = leak_sum[~leak_sum["band"].str.startswith("4.")]
+        total_all = ls["selisih_rp"].sum()
+        total_normal = ls["selisih_rp_qty_normal"].sum()
+        m1, m2 = st.columns(2)
+        m1.metric("Selisih qty normal (perlu dicek)", id_rp_short(total_normal))
+        m2.metric("Selisih pembelian besar (kemungkinan grosir)", id_rp_short(total_all - total_normal))
+        insight(f"Batas atas kebocoran harga ≈ <b>{id_rp_short(total_normal)}</b> selama periode data. "
+                "Angka ini baru bisa dipastikan kalau toko punya daftar harga grosir tertulis sebagai pembanding.")
+        fig = px.bar(ls, x="minggu", y="selisih_rp_qty_normal", color="band",
+                     color_discrete_sequence=[GREY, AMBER, RUST])
+        fig.update_layout(xaxis_title="Minggu mulai", yaxis_title="Selisih qty normal (Rp)", legend_title=None)
+        fig.update_yaxes(tickformat=",.0f")
+        st.plotly_chart(style_fig(fig, 300), use_container_width=True)
+    if not leak.empty:
+        with st.expander("📋 100 transaksi qty normal dengan selisih terbesar"):
+            st.dataframe(styled_table(leak[["tanggal", "no_faktur", "penginput", "nama_barang", "unit", "qty", "median_qty_grup",
+                                            "harga_modus", "harga_transaksi", "dibawah_modus_pct", "selisih_rp"]],
+                                      currency_cols=["harga_modus", "harga_transaksi", "selisih_rp"],
+                                      number_cols=["qty", "median_qty_grup"], pct_cols=["dibawah_modus_pct"]),
+                         use_container_width=True, hide_index=True)
+
+# ==================================================================
+# TAB: BRAND
+# ==================================================================
+with tab_brand:
+    brand = num(sbs("v_tp_brand_share", "order=omzet.desc"),
+                ["faktur", "sku", "omzet", "share_total_pct", "share_dalam_segmen_pct", "diskon_rp", "pct_baris_diskon"])
+    head("Brand dalam tiap segmen", "Siapa yang menguasai rak di tiap kelompok barang", VIOLET)
+    explain("Field brand di Accurate kosong, jadi brand <b>ditebak dari nama barang/kategori</b> (mis. 'RUCIKA', 'TIGA RODA'). "
+            "Bagian '(tidak terdeteksi)' = barang yang namanya tidak memuat brand yang dikenali. "
+            "Brand yang menguasai satu segmen adalah bahan negosiasi ke distributor — sekaligus risiko kalau pasokannya terganggu.")
+    if not brand.empty:
+        seg_tot = brand.groupby("segmen", as_index=False)["omzet"].sum().sort_values("omzet", ascending=False)
+        pilih_seg = st.selectbox("Pilih segmen:", seg_tot["segmen"].tolist(), key="pilih_segmen_brand")
+        b = brand[brand["segmen"] == pilih_seg].sort_values("omzet", ascending=True)
+        col_a, col_b = st.columns([1.2, 1])
+        with col_a:
+            fig = px.bar(b, x="share_dalam_segmen_pct", y="brand", orientation="h", text="share_dalam_segmen_pct")
+            fig.update_traces(marker_color=VIOLET, texttemplate="%{text:.1f}%", textposition="outside")
+            fig.update_layout(xaxis_title="% omzet dalam segmen", yaxis_title=None)
+            st.plotly_chart(style_fig(fig, 360), use_container_width=True)
+        with col_b:
+            st.dataframe(styled_table(b.sort_values("omzet", ascending=False)[
+                ["brand", "omzet", "share_dalam_segmen_pct", "share_total_pct", "faktur", "sku", "pct_baris_diskon"]],
+                currency_cols=["omzet"], number_cols=["faktur", "sku"],
+                pct_cols=["share_dalam_segmen_pct", "share_total_pct", "pct_baris_diskon"]),
+                use_container_width=True, hide_index=True, height=360)
+        dom = brand[(brand["brand"] != "(tidak terdeteksi)") & (brand["share_dalam_segmen_pct"] >= 50)]
+        if not dom.empty:
+            r = dom.sort_values("omzet", ascending=False).iloc[0]
+            total_disk = brand["diskon_rp"].sum()
+            porsi_disk = 100 * brand.loc[brand["brand"] == r["brand"], "diskon_rp"].sum() / total_disk if total_disk else 0
+            teks = (f"<b>{r['brand']}</b> menguasai <b>{id_pct(r['share_dalam_segmen_pct'])}</b> segmen {r['segmen']} "
+                    f"({id_pct(r['share_total_pct'])} dari total omzet toko). ")
+            if porsi_disk >= 50:
+                teks += (f"Brand ini juga menyerap <b>{id_pct(porsi_disk)} dari seluruh diskon</b> toko — pertanyaan kuncinya: "
+                         "berapa diskon yang toko sendiri terima dari distributornya? Kalau mirip, margin bisa sangat tipis.")
+            else:
+                teks += "Posisi dominan ini bisa jadi bahan negosiasi harga beli ke distributor."
+            insight(teks)
+
+        head("Porsi omzet per segmen", "", GREY)
+        fig = px.bar(seg_tot, x="segmen", y="omzet")
+        fig.update_traces(marker_color=GREY)
+        fig.update_layout(xaxis_title=None, yaxis_title="Omzet (Rp)")
+        fig.update_yaxes(tickformat=",.0f")
+        st.plotly_chart(style_fig(fig, 300), use_container_width=True)
+
+# ==================================================================
+# TAB: STOK & KATALOG
+# ==================================================================
+with tab_stok:
+    must = num(sbs("v_tp_must_have_sku", "order=hari_terjual.desc,omzet.desc"),
+               ["hari_terjual", "faktur", "qty", "omzet", "hari_transaksi", "pct_hari_terjual", "stok_master"])
+    sleep_cat = num(sbs("v_tp_sleeping_sku_by_category", "order=sku_belum_terjual.desc"),
+                    ["sku_master", "sku_terjual", "sku_belum_terjual", "pct_belum_terjual",
+                     "sku_tidur_dgn_stok_positif", "omzet_kategori"])
+
+    head("Barang yang wajib selalu ada", "Terjual di sebagian besar hari toko buka", TEAL)
+    explain("<b>Kelas A</b> = terjual di ≥50% hari toko buka, <b>Kelas B</b> = 25–50% hari. Kalau barang kelas A kosong, "
+            "pembeli hampir pasti datang dan pulang tanpa beli. Kolom stok diambil dari master Accurate, yang "
+            "<b>belum bisa dipercaya</b> (saldo awal & pembelian belum dicatat) — jadi daftar ini paling berguna sebagai "
+            "<b>urutan prioritas stock opname</b>: hitung fisik barang-barang ini dulu.")
+    if not must.empty:
+        a = must[must["kelas"].str.startswith("A")]
+        omzet_total = float(daily["omzet"].astype(float).sum()) if not daily.empty else 0
+        m1, m2, m3 = st.columns(3)
+        m1.metric("SKU kelas A", id_num(len(a)))
+        m2.metric("Omzet kelas A", id_rp_short(a["omzet"].sum()),
+                  f"{id_pct(100 * a['omzet'].sum() / omzet_total if omzet_total else 0)} dari total")
+        m3.metric("Kelas A dgn stok master ≤ 0", id_num(a["catatan_stok"].notna().sum()))
+        insight(f"Hanya <b>{id_num(len(a))} SKU</b> tapi menyumbang <b>{id_rp_short(a['omzet'].sum())}</b>. "
+                "Kalau stock opname dilakukan bertahap, mulai dari daftar ini — usaha kecil, risiko kehabisan barang terbesar tertutup.")
+        kelas = st.radio("Tampilkan:", ["A. Wajib ada", "B. Sering", "Semua"], horizontal=True, key="kelas_must")
+        show = must if kelas == "Semua" else must[must["kelas"].str.startswith(kelas[0])]
+        st.dataframe(styled_table(show[["kelas", "nama_barang", "kategori", "hari_terjual", "hari_transaksi",
+                                        "pct_hari_terjual", "qty", "omzet", "stok_master", "unit_master", "terakhir_terjual"]],
+                                  currency_cols=["omzet"], number_cols=["hari_terjual", "hari_transaksi", "qty", "stok_master"],
+                                  pct_cols=["pct_hari_terjual"]),
+                     use_container_width=True, hide_index=True)
+
+    head("Katalog yang belum pernah terjual", "SKU di master Accurate tanpa satu pun transaksi sejak go-live", GREY)
+    explain("Ini <b>bukan</b> daftar 'stok mati'. Hampir semua SKU di sini stoknya 0 di sistem — artinya masalahnya "
+            "<b>katalog master yang terlalu gemuk</b> (ratusan varian motif/ukuran), bukan uang yang tertahan di gudang. "
+            "Uang tertahan baru bisa diukur setelah saldo stok di Accurate dibenahi. Jangan hapus SKU berdasarkan tabel ini "
+            "sebelum data mencakup minimal ±3 bulan — banyak barang bangunan memang lambat tapi tetap dibutuhkan.")
+    if not sleep_cat.empty:
+        m1, m2, m3 = st.columns(3)
+        m1.metric("SKU di master", id_num(sleep_cat["sku_master"].sum()))
+        m2.metric("Belum pernah terjual", id_num(sleep_cat["sku_belum_terjual"].sum()),
+                  f"{id_pct(100 * sleep_cat['sku_belum_terjual'].sum() / max(sleep_cat['sku_master'].sum(), 1))}")
+        m3.metric("…yang stok sistemnya > 0", id_num(sleep_cat["sku_tidur_dgn_stok_positif"].sum()))
+        top = sleep_cat.head(15).sort_values("sku_belum_terjual")
+        fig = go.Figure()
+        fig.add_bar(y=top["kategori"], x=top["sku_terjual"], orientation="h", name="Pernah terjual", marker_color=TEAL)
+        fig.add_bar(y=top["kategori"], x=top["sku_belum_terjual"], orientation="h", name="Belum terjual", marker_color="#D5DAE0")
+        fig.update_layout(barmode="stack", xaxis_title="Jumlah SKU", yaxis_title=None, legend_title=None)
+        st.plotly_chart(style_fig(fig, 460), use_container_width=True)
+        with st.expander("📋 Lihat daftar SKU belum terjual per kategori"):
+            kat = st.selectbox("Kategori:", sleep_cat["kategori"].dropna().tolist(), key="kat_sleep")
+            if kat:
+                det = num(sbs("v_tp_sleeping_sku_detail", f"kategori=eq.{quote(str(kat))}&order=nama.asc&limit=500"),
+                          ["stok", "cost", "harga_jual"])
+                if not det.empty:
+                    st.dataframe(styled_table(det, currency_cols=["cost", "harga_jual"], number_cols=["stok"]),
+                                 use_container_width=True, hide_index=True)
+
+# ==================================================================
+# TAB: STAF & HARI
+# ==================================================================
+with tab_staf:
+    wl = num(sbs("v_tp_staff_workload_dow", "order=dow.asc"),
+             ["dow", "hari_buka_toko", "hari_aktif", "faktur", "faktur_per_hari_aktif", "faktur_toko_per_hari",
+              "porsi_faktur_pct", "omzet"])
+    prof = num(sbs("v_tp_staff_profile", "order=faktur.desc"),
+               ["hari_aktif", "faktur", "omzet", "rata2_faktur", "median_faktur", "rata2_baris_per_faktur",
+                "rata2_segmen_per_faktur", "pct_faktur_diatas_1jt", "diskon_rp", "pct_baris_diskon", "potensi_salah_unit"])
+
+    head("Beban kerja per hari", "Rata-rata faktur per hari buka, dan siapa yang menginput", BLUE)
+    explain("Bahan untuk menyusun jadwal jaga: hari yang paling ramai butuh orang paling banyak. "
+            "Catatan: tiap hari baru punya 3–4 contoh, jadi selisih kecil antar-hari masih bisa kebetulan.")
+    if not wl.empty:
+        toko = wl.groupby(["dow", "hari"], as_index=False).agg(faktur_toko_per_hari=("faktur_toko_per_hari", "max"),
+                                                               hari_buka=("hari_buka_toko", "max")).sort_values("dow")
+        col_a, col_b = st.columns([1, 1.2])
+        with col_a:
+            fig = px.bar(toko, x="hari", y="faktur_toko_per_hari", text="faktur_toko_per_hari")
+            fig.update_traces(marker_color=BLUE, texttemplate="%{text:.0f}", textposition="outside")
+            fig.update_layout(xaxis_title=None, yaxis_title="Faktur / hari buka")
+            st.plotly_chart(style_fig(fig, 320), use_container_width=True)
+            ramai = toko.loc[toko["faktur_toko_per_hari"].idxmax()]
+            sepi = toko.loc[toko["faktur_toko_per_hari"].idxmin()]
+            insight(f"<b>{ramai['hari']}</b> paling ramai (±{id_num(ramai['faktur_toko_per_hari'])} faktur/hari), "
+                    f"<b>{sepi['hari']}</b> paling sepi (±{id_num(sepi['faktur_toko_per_hari'])}). "
+                    f"Kalau ada staf paruh waktu, prioritaskan jadwalnya di {ramai['hari']}.")
+        with col_b:
+            pv = wl.pivot_table(index="penginput", columns="hari", values="hari_aktif", aggfunc="sum").fillna(0)
+            order = [h for h in ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"] if h in pv.columns]
+            pv = pv[order]
+            hb = toko.set_index("hari")["hari_buka"]
+            fig = px.imshow(pv, text_auto=True, aspect="auto", color_continuous_scale=[[0, "#EDEFF2"], [1, BLUE]])
+            fig.update_layout(coloraxis_showscale=False, xaxis_title=None, yaxis_title=None,
+                              title=dict(text="Jumlah hari aktif menginput (dari " +
+                                         ", ".join(f"{h[:3]} {int(hb.get(h, 0))}" for h in order) + " hari buka)",
+                                         font=dict(size=12, color=TEXT_MUTED)))
+            st.plotly_chart(style_fig(fig, 320), use_container_width=True)
+
+    head("Profil penginput", "Untuk bahan pelatihan, bukan penilaian kinerja", GREY)
+    explain("Perbedaan rata-rata nilai faktur antar staf bisa karena <b>siapa yang kebetulan melayani pembeli proyek</b>, "
+            "bukan karena kemampuan menjual. Yang paling bisa langsung ditindaklanjuti adalah kolom "
+            "<b>potensi salah satuan</b> — itu kebutuhan pelatihan input, dan dampaknya ke stok nyata.")
+    if not prof.empty:
+        prof["salah_unit_per_100_faktur"] = (100 * prof["potensi_salah_unit"] / prof["faktur"].where(prof["faktur"] > 0)).round(1)
+        with st.expander("👤 Tampilkan profil per penginput"):
+            st.dataframe(styled_table(prof[["penginput", "hari_aktif", "faktur", "median_faktur", "rata2_faktur",
+                                            "rata2_baris_per_faktur", "pct_faktur_diatas_1jt", "segmen_utama",
+                                            "pct_baris_diskon", "diskon_rp", "potensi_salah_unit", "salah_unit_per_100_faktur"]],
+                                      currency_cols=["median_faktur", "rata2_faktur", "diskon_rp"],
+                                      number_cols=["hari_aktif", "faktur", "potensi_salah_unit"],
+                                      pct_cols=["pct_faktur_diatas_1jt", "pct_baris_diskon"]),
+                         use_container_width=True, hide_index=True)
+
+# ==================================================================
 # TAB 5: KUALITAS DATA
 # ==================================================================
 with tab_kualitas:
@@ -622,7 +1009,7 @@ with tab_kualitas:
 # SIDEBAR
 # ======================================================================
 st.sidebar.markdown("### 🧱 Toko Pertiwi")
-st.sidebar.caption("Sumber: Supabase, auto-sync harian. Cache 5 menit.")
+st.sidebar.caption("Sumber: Supabase, auto-sync tiap malam ±21:00 WIB. Cache 5 menit.")
 st.sidebar.markdown("---")
 st.sidebar.markdown("""
 **Catatan kualitas data**
@@ -630,4 +1017,7 @@ st.sidebar.markdown("""
 - HPP baru ada di sebagian kecil SKU — margin belum representatif
 - Field satuan (`unit`) kadang salah input kasir
 - Rentang data masih pendek — tren akan makin tajam seiring waktu
+- Nama pelanggan kosong di hampir semua faktur — pembeli besar belum bisa dikenali
+- Stok master belum andal (saldo awal & pembelian belum dicatat di Accurate)
+- Brand dideteksi dari nama barang (field brand Accurate kosong)
 """)
