@@ -6,7 +6,7 @@ Perubahan v13 (25 Sep 2026):
 - 5 tab analisa baru: Pembeli Besar, Diskon & Harga, Brand, Stok & Katalog,
   Staf & Hari (sumber: view v_tp_* baru di Supabase)
 - Deteksi hari "parsial" (data hari terakhir belum lengkap) di hero & grafik
-- Badge kesegaran data pakai jam WIB (bukan jam server UTC)
+- Badge kesegaran data diukur dari jam sync terakhir (Minggu/libur tidak lagi dianggap telat)
 - Catatan umur data ("data baru X hari") di hero
 - Password TIDAK lagi ditulis di kode (repo publik) — lokal dibaca dari
   config_supabase.py (LOGIN_EMAIL, LOGIN_PASSWORD)
@@ -323,7 +323,7 @@ dow = sb("v_tp_sales_by_dow", "order=urutan_hari.asc")
 col_title, col_refresh, col_logout = st.columns([4, 1, 1])
 with col_title:
     st.markdown("## Toko Pertiwi")
-    st.caption("Sales & Promosi — data langsung dari Supabase, ter-update otomatis tiap hari")
+    st.caption("Sales & Promosi — data dari Accurate via Supabase, sinkron otomatis tiap malam ±21:00 WIB (Minggu toko tutup)")
 with col_refresh:
     if st.button("🔄 Refresh"):
         st.cache_data.clear()
@@ -349,20 +349,48 @@ if not daily.empty:
     </div>
     """, unsafe_allow_html=True)
 
-    # ---- Badge kesehatan sinkronisasi data ----
+    # ---- Badge kesehatan sinkronisasi ----
+    # Diukur dari JAM SYNC TERAKHIR (bukan tanggal transaksi terakhir), supaya hari Minggu/libur
+    # toko tutup tidak dianggap "data telat". Sync terjadwal tiap malam ±21:00 WIB.
+    HARI_ID = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
     try:
         last_date = datetime.strptime(daily["tanggal"].max(), "%Y-%m-%d").date()
-        days_stale = (today_wib() - last_date).days
+        last_date_txt = f"{HARI_ID[last_date.weekday()]} {last_date.strftime('%d-%m-%Y')}"
     except (TypeError, ValueError):
-        days_stale = None
+        last_date, last_date_txt = None, "-"
 
-    if days_stale is not None:
-        if days_stale <= 1:
-            b_color, b_bg, b_text = TEAL, "#EAF6F1", f"✅ Data up to date — transaksi terakhir {last_date}"
-        elif days_stale <= 3:
-            b_color, b_bg, b_text = AMBER, "#FFF8EC", f"⚠️ Data telat {days_stale} hari — transaksi terakhir {last_date}, cek sinkronisasi"
+    sync_state = sbs("toko_pertiwi_sync_state_v1", "select=module,last_success_at,status")
+    sync_age_h, sync_txt = None, None
+    if not sync_state.empty and "last_success_at" in sync_state.columns:
+        ts = pd.to_datetime(sync_state["last_success_at"], utc=True, errors="coerce").dropna()
+        if not ts.empty:
+            oldest = ts.min()  # modul yang paling lama belum ter-sync = yang menentukan
+            sync_age_h = (pd.Timestamp.now(tz="UTC") - oldest).total_seconds() / 3600
+            sync_txt = oldest.tz_convert("Asia/Jakarta").strftime("%d-%m-%Y %H:%M") + " WIB"
+
+    if sync_age_h is not None:
+        if sync_age_h <= 30:
+            b_color, b_bg, b_text = TEAL, "#EAF6F1", f"✅ Sinkron terakhir {sync_txt} — transaksi terakhir {last_date_txt}"
+        elif sync_age_h <= 54:
+            b_color, b_bg, b_text = AMBER, "#FFF8EC", (f"⚠️ Sync malam terakhir terlewat — sinkron terakhir {sync_txt} "
+                                                        f"({id_num(sync_age_h)} jam lalu). Cek antrian sync.")
         else:
-            b_color, b_bg, b_text = RUST, "#FCEDEA", f"🔴 Sinkronisasi kemungkinan macet — data terakhir {days_stale} hari lalu ({last_date})"
+            b_color, b_bg, b_text = RUST, "#FCEDEA", (f"🔴 Sinkronisasi kemungkinan macet — terakhir {sync_txt} "
+                                                       f"({id_num(sync_age_h / 24, 1)} hari lalu)")
+    elif last_date is not None:
+        # Cadangan kalau tabel status sync tidak terbaca: pakai tanggal transaksi, Minggu tidak dihitung
+        gap = [today_wib() - pd.Timedelta(days=i) for i in range(1, (today_wib() - last_date).days)]
+        hari_kerja_hilang = sum(1 for d in gap if d.weekday() != 6)
+        if hari_kerja_hilang == 0:
+            b_color, b_bg, b_text = TEAL, "#EAF6F1", f"✅ Data up to date — transaksi terakhir {last_date_txt}"
+        elif hari_kerja_hilang <= 2:
+            b_color, b_bg, b_text = AMBER, "#FFF8EC", f"⚠️ {hari_kerja_hilang} hari buka belum ada datanya — transaksi terakhir {last_date_txt}"
+        else:
+            b_color, b_bg, b_text = RUST, "#FCEDEA", f"🔴 Sinkronisasi kemungkinan macet — transaksi terakhir {last_date_txt}"
+    else:
+        b_text = None
+
+    if b_text:
         st.markdown(
             f'<div style="display:inline-block; background:{b_bg}; border:1px solid {b_color}; color:{b_color}; '
             f'padding:5px 14px; border-radius:20px; font-size:0.82rem; font-weight:600; margin-bottom:10px;">{b_text}</div>',
